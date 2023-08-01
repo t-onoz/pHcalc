@@ -182,6 +182,142 @@ class Acid:
             den = h3o_Ka.sum()
             return h3o_Ka/den
 
+class PolyAcid:
+    '''A class that represents a set of poly-acid equilibria,
+
+    p (H+) + q (B^Z+) ⇔ [H(p-2r)B(q)O(-2r)^(p+qZ)] + r H2O,
+
+    where B represents most basic species (e.g. WO4^2-).
+
+    Note: the list of species is sorted from the most acidic to the least acidic one.
+
+    Parameters
+    ----------
+    p : float, list, Numpy Array
+        This defines the degree of protonation (p value) in each equilibrium.
+
+    q : float, list, Numpy Array
+        This defines the number of bases (q value) in each equilibrium.
+
+    K : None (default), float, list, Numpy Array
+        This defines the K values for all equilibria,
+            K = [H+]^p[B]^q/[H(p-2r)B(q)O(-2r)].
+        It can be a single K value (float), a list of floats, or a Numpy array
+        of floats. Either this value or pK needs to be defined. The other
+        will then be calculated from the given values.
+
+    pK : None (default), float, list, Numpy Array
+        The pK value(s) for all the poly-acid equilibria.  This
+        follows the same rules as K (See K description for more details),
+        and either this value or K must be defined.
+
+    charge : None (default), int
+        This is the charge of *the most basic* form of this acid. This
+        must be defined.
+
+    conc : None (default), float
+        The formal concentration of this acid in solution. This value must be
+        defined.
+
+    '''
+
+    def __init__(self, p, q, K=None, pK=None, charge=None, conc=None):
+        # Do a couple quick checks to make sure that everything has been
+        # defined.
+        if K == None and pK == None:
+            raise ValueError(
+                "You must define either Ka or pKa values.")
+        elif charge == None:
+            raise ValueError(
+                "The minimum charge for this acid must be defined.")
+        elif conc == None:
+            raise ValueError(
+                "The conc for this acid must be defined.")
+
+        # Make sure both Ka and pKa are calculated.
+        elif K == None:
+            if isinstance(pK, (int, float)):
+                self.pK = np.array([pK, ], dtype=float)
+            else:
+                self.pK = np.array(pK, dtype=float)
+            self.K = 10 ** (-self.pK)
+        elif pK == None:
+            if isinstance(K, (int, float)):
+                self.K = np.array([K, ], dtype=float)
+            else:
+                self.K = np.array(K, dtype=float)
+            self.pK = -np.log10(self.K)
+
+        if isinstance(p, (int, float)):
+            self.p = np.array([p, ], dtype=float)
+        else:
+            self.p = np.array(p, dtype=float)
+
+        if isinstance(p, (int, float)):
+            self.q = np.array([q, ], dtype=float)
+        else:
+            self.q = np.array(q, dtype=float)
+
+        # Sort p values from most acidic to least acidic
+        s = np.argsort(self.p/self.q, kind='stable')[::-1]
+        self.p = self.p[s]
+        self.q = self.q[s]
+        self.pK = self.pK[s]
+        self.K = self.K[s]
+
+        # Make a list of charges for each species defined by the K values.
+        self.charge = np.array([(p_ + q_ * charge) / q_ for p_, q_ in zip(self.p, self.q)] + [charge])
+        # Make sure the concentrations are accessible to the object instance.
+        self.conc = conc
+
+    def alpha(self, pH):
+        '''Return the fraction of each species at a given pH.
+
+        Parameters
+        ----------
+        pH : int, float, or Numpy Array
+            These are the pH value(s) over which the fraction should be
+            returned.
+
+        Returns
+        -------
+        Numpy NDArray
+            These are the fractional concentrations at any given pH.  They are
+            sorted from the most acidic to the least acidic species. If a
+            NDArray of pH values is provided, then a 2D array will be
+            returned. In this case, each row represents the speciation for
+            each given pH.
+        '''
+        # If the given pH is not a list/array, be sure to convert it to one
+        # for future calcs.
+        if isinstance(pH, (int, float)):
+            pH = [pH, ]
+        pH = np.array(pH, dtype=float)
+
+        # solve the equilibrium for the given pH
+        c = np.ones(pH.shape) * np.nan
+        for i in range(c.size):
+            root = spo.root_scalar(self._f_equiv, args=(pH[i],), bracket=[0, self.conc], xtol=1e-100, rtol=1e-6)
+            c[i] = root.root
+            if not root.converged:
+                print('Warning: poly-acid equilibrium solver did not converge!')
+                print(root.flag)
+        c_all = [q * 10.0 ** (pK - p * pH) * c ** q for p, q, pK in zip(self.p, self.q, self.pK)] + [c]
+
+        if len(pH) > 1:
+            return np.array(c_all).transpose() / self.conc
+        else:
+            return np.array([a[0] for a in c_all]) / self.conc
+
+    def _f_equiv(self, x, pH):
+        # conservation of sum of all poly-acid species.
+        # this function should have just one root in the range of 0 < x < conc.
+        # x is the concentration of the most basic component.
+        c = x
+        for p, q, pK in zip(self.p, self.q, self.pK):
+            c += q * 10.0 ** (pK - p * pH) * x ** q
+        return c - self.conc
+
 
 class System:
     '''An object used to define an a system of acid and neutral species.
@@ -361,6 +497,41 @@ if __name__ == '__main__':
     except:
         print('Matplotlib not installed. Some examples not run.')
     else:
+        # Distribution diagram of isopolytungstates
+        # Ref.: http://dx.doi.org/10.1039/dt9870001701
+        a = PolyAcid(p=[9, 14, 8, 6], q=[7, 12, 7, 6], pK=[69.96, 115.38, 65.19, 49.01], conc=0.001, charge=-2)
+        labels = ['[HW7O24]5-', '[H2W12O42]10-', '[W7O24]6-', '[W6O21]6-', '[WO4]2-']
+        pH = np.linspace(6.5, 4.5, 201)
+        plt.plot(pH, a.alpha(pH), label=labels)
+        plt.xlim(pH[0], pH[-1])
+        plt.legend()
+        plt.show()
+        a.conc = 0.1
+        pH = np.linspace(8, 5.5, 251)
+        plt.plot(pH, a.alpha(pH), label=labels)
+        plt.xlim(pH[0], pH[-1])
+        plt.legend()
+        plt.show()
+
+        # Sodium Tungstate Titration curve
+        Cl_concs = np.linspace(1.e-8, 0.013, 100)
+        # Here's our Acid
+        PolyW = PolyAcid(p=[9, 14, 8, 6], q=[7, 12, 7, 6], pK=[69.96, 115.38, 65.19, 49.01], conc=0.01, charge=-2)
+        Na = Inert(charge=1, conc=0.02)
+        phs = []
+        guess = 8.0
+        for conc in Cl_concs:
+            # Create a neutral Na+ with the concentration of the sodium
+            # hydroxide titrant added
+            Cl = Inert(charge=-1, conc=conc)
+            # Define the system and solve for the pH
+            s = System(PolyW, Na, Cl)
+            s.pHsolve(guess=guess)
+            phs.append(s.pH)
+            guess = s.pH
+        plt.plot(Cl_concs, phs)
+        plt.show()
+
         # Distribution diagram H3PO4
         a = Acid(pKa=[2.148, 7.198, 12.375], charge=0, conc=1.e-3)
         pH = np.linspace(0, 14, 1000)
@@ -393,3 +564,4 @@ if __name__ == '__main__':
             phs.append(s.pH)
         plt.plot(Na_concs, phs)
         plt.show()
+
